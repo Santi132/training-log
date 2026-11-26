@@ -1,33 +1,39 @@
-// Bump V to force clients to drop old caches.
-const V = "training-log-v1";
-const CORE = ["./", "index.html", "manifest.json", "icon-180.png", "icon-192.png", "icon-512.png"];
+// Bump V on every release: install pre-caches the new shell, activate drops old caches.
+// Stale-while-revalidate means a deployed change shows up on the *second* launch.
+const V = 'tl-v7';
+const SHELL = ['./', 'index.html', 'manifest.json', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
-self.addEventListener("install", e => {
-  e.waitUntil(caches.open(V).then(c => c.addAll(CORE)).then(() => self.skipWaiting()));
+self.addEventListener('install', e => {
+  e.waitUntil(
+    caches.open(V)
+      .then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' }))))  // bypass the HTTP cache
+      .then(() => self.skipWaiting())
+  );
 });
 
-self.addEventListener("activate", e => {
+self.addEventListener('activate', e => {
   e.waitUntil(
     caches.keys()
-      .then(ks => Promise.all(ks.filter(k => k !== V).map(k => caches.delete(k))))
+      .then(keys => Promise.all(keys.filter(k => k !== V).map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
 
-// Stale-while-revalidate: serve the cached copy instantly, refresh it in the background.
-// Also caches the Google Fonts files the first time they load.
-self.addEventListener("fetch", e => {
-  if (e.request.method !== "GET") return;
-  e.respondWith(
-    caches.match(e.request, { ignoreSearch: true }).then(hit => {
-      const net = fetch(e.request).then(r => {
-        if (r && (r.ok || r.type === "opaque")) {
-          const copy = r.clone();
-          caches.open(V).then(c => c.put(e.request, copy));
-        }
-        return r;
-      }).catch(() => hit);
-      return hit || net;
-    })
-  );
+// Stale-while-revalidate for every GET, same-origin or not (Google Fonts CSS and font files included).
+self.addEventListener('fetch', e => {
+  const req = e.request;
+  if (req.method !== 'GET' || !req.url.startsWith('http')) return;
+  const nav = req.mode === 'navigate';
+  e.respondWith((async () => {
+    const cache = await caches.open(V);
+    const cached = (await cache.match(req, { ignoreSearch: nav })) || (nav ? await cache.match('./') : undefined);
+    const fresh = fetch(req).then(res => {
+      if (res && (res.status === 200 || res.type === 'opaque')) cache.put(req, res.clone()).catch(() => {});
+      return res;
+    }).catch(() => undefined);
+    if (cached) { e.waitUntil(fresh); return cached; }
+    const res = await fresh;
+    if (res) return res;
+    return (nav && (await cache.match('index.html'))) || Response.error();
+  })());
 });
